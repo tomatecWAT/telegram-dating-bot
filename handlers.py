@@ -1,183 +1,277 @@
-# handlers.py
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton, ReplyKeyboardRemove
+)
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 
 from database import (
-    upsert_user_from_telegram,
     get_user_by_telegram_id,
+    add_user,
+    update_user_field,
     get_next_profile_for,
+    get_random_profile,
     add_like,
-    check_and_create_match_if_any,
-    get_user_by_id,
-    get_profile_payload
+    check_match
 )
 
 router = Router()
 
-# --- FSM States for registration ---
-class RegStates(StatesGroup):
-    waiting_gender = State()
-    waiting_age = State()
-    waiting_city = State()
-    waiting_target = State()
-    waiting_bio = State()
-    waiting_photo = State()
+# in-memory map user_id -> last shown profile row
+viewing_state = {}
 
-# /start - начало регистрации (если профиль существует, кратко приветствуем)
-@router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    tg_id = message.from_user.id
-    existing = get_user_by_telegram_id(tg_id)
-    if existing:
-        await message.answer("С возвращением! Ваша анкета уже есть в базе. Используйте /browse чтобы смотреть других.")
-        await state.clear()
+# ========== FSM для регистрации ==========
+class Registration(StatesGroup):
+    gender = State()
+    age = State()
+    city = State()
+    target = State()
+    bio = State()
+    photo = State()
+
+# ========== Контекстные меню ==========
+
+# 2.1 Меню при просмотре моего профиля
+profile_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="👀 Смотреть анкеты")],
+        [KeyboardButton(text="🖼️ Изменить фото анкеты")],
+        [KeyboardButton(text="💬 Изменить текст анкеты (био)")],
+        [KeyboardButton(text="🎯 Изменить цель")],
+        [KeyboardButton(text="🎂 Изменить возраст")]
+    ],
+    resize_keyboard=True
+)
+
+profile_menu_text = (
+    "📄 Меню профиля:\n"
+    "1. Смотреть анкеты\n"
+    "2. Изменить фото анкеты\n"
+    "3. Изменить текст анкеты (био)\n"
+    "4. Изменить цель\n"
+    "5. Изменить возраст"
+)
+
+# 2.2 Меню при просмотре чужой анкеты
+view_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="❤️ Лайк"), KeyboardButton(text="👎 Дизлайк")],
+        [KeyboardButton(text="⏸ Приостановить поиск")]
+    ],
+    resize_keyboard=True
+)
+
+view_menu_text = (
+    "👤 Меню просмотра анкеты:\n"
+    "1. Лайк ❤️\n"
+    "2. Дизлайк 👎\n"
+    "3. Приостановить поиск ⏸"
+)
+
+# 2.3 Меню при приостановленном поиске
+paused_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="👀 Смотреть анкеты")],
+        [KeyboardButton(text="📄 Моя анкета")],
+        [KeyboardButton(text="🚫 Я больше не хочу никого искать")]
+    ],
+    resize_keyboard=True
+)
+
+paused_menu_text = (
+    "⏸ Поиск приостановлен. Доступные действия:\n"
+    "1. Смотреть анкеты\n"
+    "2. Моя анкета\n"
+    "3. Я больше не хочу никого искать"
+)
+
+# 2.4 Меню при остановленном поиске
+stopped_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="👀 Смотреть анкеты")]
+    ],
+    resize_keyboard=True
+)
+
+stopped_menu_text = (
+    "🚫 Поиск остановлен. Доступные действия:\n"
+    "1. Смотреть анкеты"
+)
+
+# ========== Команды ==========
+
+@router.message(Command("myprofile"))
+async def cmd_myprofile(message: Message):
+    user = get_user_by_telegram_id(message.from_user.id)
+    if not user:
+        await message.answer("У тебя ещё нет анкеты. Используй /resetprofile для создания.")
         return
 
-    await message.answer("Привет! Давай создадим твою анкету.\nСначала: укажи пол (male/female/other).")
-    await state.set_state(RegStates.waiting_gender)
-
-@router.message(RegStates.waiting_gender)
-async def process_gender(message: Message, state: FSMContext):
-    gender = message.text.strip().lower()
-    if gender not in ("male", "female", "other"):
-        await message.answer("Непонятно. Введи 'male', 'female' или 'other'.")
-        return
-    await state.update_data(gender=gender)
-    await message.answer("Отлично. Укажи возраст (числом).")
-    await state.set_state(RegStates.waiting_age)
-
-@router.message(RegStates.waiting_age)
-async def process_age(message: Message, state: FSMContext):
-    try:
-        age = int(message.text.strip())
-        if age <= 0 or age > 120:
-            raise ValueError
-    except ValueError:
-        await message.answer("Возраст должен быть корректным числом, например: 25")
-        return
-    await state.update_data(age=age)
-    await message.answer("Укажи город.")
-    await state.set_state(RegStates.waiting_city)
-
-@router.message(RegStates.waiting_city)
-async def process_city(message: Message, state: FSMContext):
-    city = message.text.strip()
-    await state.update_data(city=city)
-    await message.answer("Какая цель знакомства? (общение/дружба/отношения/другое)")
-    await state.set_state(RegStates.waiting_target)
-
-@router.message(RegStates.waiting_target)
-async def process_target(message: Message, state: FSMContext):
-    target = message.text.strip()
-    await state.update_data(target=target)
-    await message.answer("Напиши короткое описание о себе (bio).")
-    await state.set_state(RegStates.waiting_bio)
-
-@router.message(RegStates.waiting_bio)
-async def process_bio(message: Message, state: FSMContext):
-    bio = message.text.strip()
-    await state.update_data(bio=bio)
-    await message.answer("Пришли своё фото (как фото, не файл).")
-    await state.set_state(RegStates.waiting_photo)
-
-@router.message(RegStates.waiting_photo, F.photo)
-async def process_photo(message: Message, state: FSMContext):
-    photo = message.photo[-1].file_id  # самый большой
-    data = await state.get_data()
-    tg_id = message.from_user.id
-
-    # сохраняем или обновляем запись
-    user_db_id = upsert_user_from_telegram(
-        telegram_id=tg_id,
-        gender=data.get("gender"),
-        age=data.get("age"),
-        city=data.get("city"),
-        target=data.get("target"),
-        bio=data.get("bio"),
-        photo=photo
+    text = (
+        f"👤 Пол: {user[2]}\n"
+        f"🎂 Возраст: {user[3]}\n"
+        f"🏙️ Город: {user[4]}\n"
+        f"🎯 Цель: {user[5]}\n"
+        f"💬 О себе: {user[6]}"
     )
-    await message.answer("Анкета сохранена! Теперь можно смотреть профили: /browse")
+    if user[7]:
+        await message.answer_photo(photo=user[7], caption=text)
+    else:
+        await message.answer(text)
+
+    await message.answer(profile_menu_text, reply_markup=profile_menu)
+
+@router.message(Command("editprofile"))
+async def cmd_editprofile(message: Message, state: FSMContext):
+    await message.answer("Редактируем анкету. Напиши свой пол (male/female/other):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Registration.gender)
+
+@router.message(Command("resetprofile"))
+async def cmd_resetprofile(message: Message, state: FSMContext):
+    await message.answer("Заполним анкету заново! Напиши свой пол (male/female/other):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Registration.gender)
+
+@router.message(F.text == "👀 Смотреть анкеты")
+async def cmd_view(message: Message):
+    profile = get_random_profile(message.from_user.id)
+    if not profile:
+        await message.answer("Пока нет анкет для просмотра.")
+        return
+
+    text = (
+        f"👤 Пол: {profile[2]}\n"
+        f"🎂 Возраст: {profile[3]}\n"
+        f"🏙️ Город: {profile[4]}\n"
+        f"🎯 Цель: {profile[5]}\n"
+        f"💬 О себе: {profile[6]}"
+    )
+    if profile[7]:
+        await message.answer_photo(photo=profile[7], caption=text)
+    else:
+        await message.answer(text)
+
+    # remember which profile we've shown to this user so Like/Dislike applies to it
+    viewing_state[message.from_user.id] = profile
+    await message.answer(view_menu_text, reply_markup=view_menu)
+
+
+@router.message(Command("view"))
+async def cmd_view(message: Message):
+    profile = get_random_profile(message.from_user.id)
+    if not profile:
+        await message.answer("Пока нет анкет для просмотра.")
+        return
+
+    text = (
+        f"👤 Пол: {profile[2]}\n"
+        f"🎂 Возраст: {profile[3]}\n"
+        f"🏙️ Город: {profile[4]}\n"
+        f"🎯 Цель: {profile[5]}\n"
+        f"💬 О себе: {profile[6]}"
+    )
+    if profile[7]:
+        await message.answer_photo(photo=profile[7], caption=text)
+    else:
+        await message.answer(text)
+
+    # remember which profile we've shown to this user so Like/Dislike applies to it
+    viewing_state[message.from_user.id] = profile
+    await message.answer(view_menu_text, reply_markup=view_menu)
+
+# ========== Логика просмотра анкет ==========
+
+@router.message(F.text == "❤️ Лайк")
+async def like_profile(message: Message):
+    target = viewing_state.get(message.from_user.id)
+    if not target:
+        await message.answer("Анкеты закончились.")
+        return
+    # target is a row from users: (id, telegram_id, gender, age, city, target, bio, photo)
+    target_telegram_id = target[1]
+    add_like(message.from_user.id, target_telegram_id, action="like")
+    if check_match(message.from_user.id, target_telegram_id):
+        await message.answer("🎉 У вас совпадение! Напишите друг другу в телеграм.")
+    else:
+        await message.answer("Лайк поставлен ✅")
+
+    # clear viewed profile so next view will fetch another
+    viewing_state.pop(message.from_user.id, None)
+    await cmd_view(message)
+
+
+@router.message(F.text == "👎 Дизлайк")
+async def dislike_profile(message: Message):
+    target = viewing_state.get(message.from_user.id)
+    if target:
+        target_telegram_id = target[1]
+        add_like(message.from_user.id, target_telegram_id, action="dislike")
+        viewing_state.pop(message.from_user.id, None)
+    await message.answer("Пропускаем эту анкету 👌")
+    await cmd_view(message)
+    # логика дизлайка — можно записать в отдельную таблицу
+
+@router.message(F.text == "⏸ Приостановить поиск")
+async def pause_search(message: Message):
+    await message.answer(paused_menu_text, reply_markup=paused_menu)
+
+@router.message(F.text == "🚫 Я больше не хочу никого искать")
+async def stop_search(message: Message):
+    await message.answer(stopped_menu_text, reply_markup=stopped_menu)
+
+# ========== FSM-хендлеры регистрации ==========
+@router.message(Registration.gender)
+async def reg_gender(message: Message, state: FSMContext):
+    await state.update_data(gender=message.text)
+    await message.answer("Сколько тебе лет?")
+    await state.set_state(Registration.age)
+
+@router.message(Registration.age)
+async def reg_age(message: Message, state: FSMContext):
+    await state.update_data(age=message.text)
+    await message.answer("В каком городе живёшь?")
+    await state.set_state(Registration.city)
+
+@router.message(Registration.city)
+async def reg_city(message: Message, state: FSMContext):
+    await state.update_data(city=message.text)
+    await message.answer("Какая цель знакомства?")
+    await state.set_state(Registration.target)
+
+@router.message(Registration.target)
+async def reg_target(message: Message, state: FSMContext):
+    await state.update_data(target=message.text)
+    await message.answer("Напиши пару слов о себе.")
+    await state.set_state(Registration.bio)
+
+@router.message(Registration.bio)
+async def reg_bio(message: Message, state: FSMContext):
+    await state.update_data(bio=message.text)
+    await message.answer("Теперь пришли фото для анкеты.")
+    await state.set_state(Registration.photo)
+
+@router.message(Registration.photo, F.photo)
+async def reg_photo(message: Message, state: FSMContext):
+    photo_id = message.photo[-1].file_id
+    data = await state.update_data(photo=photo_id)
+    data = await state.get_data()
+
+    add_user(
+        telegram_id=message.from_user.id,
+        gender=data["gender"],
+        age=data["age"],
+        city=data["city"],
+        target=data["target"],
+        bio=data["bio"],
+        photo=data["photo"]
+    )
+
+    await message.answer("Анкета сохранена! 🎉", reply_markup=profile_menu)
+    await message.answer(profile_menu_text, reply_markup=profile_menu)
     await state.clear()
 
-@router.message(RegStates.waiting_photo)
-async def process_photo_invalid(message: Message):
-    await message.answer("Пожалуйста, пришли фото (как изображение).")
 
-# /browse - показать одну карточку
-@router.message(Command("browse"))
-async def cmd_browse(message: Message):
-    tg_id = message.from_user.id
-    me = get_user_by_telegram_id(tg_id)
-    if not me:
-        await message.answer("Сначала зарегистрируйся: /start")
-        return
-    me_id = me["id"]
-    candidate = get_next_profile_for(me_id)
-    if not candidate:
-        await message.answer("Пока нет доступных анкет. Попробуй позже.")
-        return
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👍 Лайк", callback_data=f"like:{candidate['id']}"),
-            InlineKeyboardButton(text="➡️ Пропуск", callback_data=f"skip:{candidate['id']}")
-        ]
-    ])
 
-    text = (f"{candidate['gender'].title()}, {candidate['age']} лет\n"
-            f"{candidate['city']}\nЦель: {candidate['target']}\n\n{candidate['bio']}")
-    if candidate["photo"]:
-        await message.answer_photo(photo=candidate["photo"], caption=text, reply_markup=kb)
-    else:
-        await message.answer(text, reply_markup=kb)
-
-# Колбэки like / skip
-@router.callback_query(lambda c: c.data and c.data.startswith("like:"))
-async def callback_like(query: CallbackQuery):
-    data = query.data.split(":")
-    to_user_id = int(data[1])
-    from_tg_id = query.from_user.id
-    from_row = get_user_by_telegram_id(from_tg_id)
-    if not from_row:
-        await query.answer("Сначала зарегистрируйся: /start", show_alert=True)
-        return
-    from_id = from_row["id"]
-
-    added = add_like(from_id, to_user_id)
-    if not added:
-        await query.answer("Вы уже лайкали этого пользователя.", show_alert=True)
-        return
-
-    # проверяем матч
-    match_id = check_and_create_match_if_any(from_id, to_user_id)
-    # сообщение для кликнувшего
-    await query.answer("Лайк отправлен!")
-
-    # покажем следующую карточку (простая логика: используем /browse команду — но лучше показать следующую прямо)
-    # Попытаемся показать следующую карточку - emulate by editing or just send a hint
-    await query.message.answer("Показываю следующую анкету...")
-    # получили match -> уведомляем обе стороны
-    if match_id:
-        # получаем профили
-        a = get_user_by_id(from_id)
-        b = get_user_by_id(to_user_id)
-        # составим текст сообщений
-        text_for_a = (f"У вас матч! 👏\n\nПрофиль партнёра:\n"
-                      f"{b['gender'].title()}, {b['age']} лет\n{b['city']}\nЦель: {b['target']}\n\n{b['bio']}\n\n"
-                      f"Открыть чат: tg://user?id={b['telegram_id']}")
-        text_for_b = (f"У вас матч! 👏\n\nПрофиль партнёра:\n"
-                      f"{a['gender'].title()}, {a['age']} лет\n{a['city']}\nЦель: {a['target']}\n\n{a['bio']}\n\n"
-                      f"Открыть чат: tg://user?id={a['telegram_id']}")
-
-        # отправляем сообщения (через бота) — используем метод bot.send_message
-        await query.message.bot.send_message(chat_id=a["telegram_id"], text=text_for_a)
-        await query.message.bot.send_message(chat_id=b["telegram_id"], text=text_for_b)
-
-@router.callback_query(lambda c: c.data and c.data.startswith("skip:"))
-async def callback_skip(query: CallbackQuery):
-    # простое поведение: ответить и посоветовать снова нажать /browse
-    await query.answer("Пропущено.")
-    await query.message.answer("Если хочешь — продолжай: /browse")

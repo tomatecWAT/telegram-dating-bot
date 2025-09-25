@@ -1,162 +1,197 @@
-# database.py
 import sqlite3
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+
 from config import DB_PATH
 
+
 def get_connection():
-    # ensure row access by name
-    conn = sqlite3.connect(DB_PATH)
+    # Allow connections from different threads and return Row objects for
+    # nicer attribute access (row['field_name']). Using Row keeps callers
+    # backwards-compatible with tuple-index access while improving clarity.
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-def create_tables():
-    sql_users = """
+
+# ========== Инициализация ==========
+def init_db():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Пользователи
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER UNIQUE NOT NULL,
+        telegram_id INTEGER UNIQUE,
         gender TEXT,
         age INTEGER,
         city TEXT,
         target TEXT,
         bio TEXT,
-        photo TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    """
-    sql_likes = """
+        photo TEXT
+    )
+    """)
+
+    # Лайки
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS likes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_user INTEGER NOT NULL,
-        to_user INTEGER NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (from_user) REFERENCES users (id) ON DELETE CASCADE,
-        FOREIGN KEY (to_user) REFERENCES users (id) ON DELETE CASCADE,
-        UNIQUE (from_user, to_user)
-    );
-    """
-    sql_matches = """
+        from_user INTEGER,
+        to_user INTEGER,
+        action TEXT CHECK(action IN ('like', 'dislike')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Матчи
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS matches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user1 INTEGER NOT NULL,
-        user2 INTEGER NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user1) REFERENCES users (id) ON DELETE CASCADE,
-        FOREIGN KEY (user2) REFERENCES users (id) ON DELETE CASCADE,
-        UNIQUE (user1, user2)
-    );
-    """
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.executescript(sql_users + sql_likes + sql_matches)
-        conn.commit()
+        user1 INTEGER,
+        user2 INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
-# USER CRUD
-def upsert_user_from_telegram(telegram_id: int, **fields) -> int:
+    conn.commit()
+    conn.close()
+
+
+# ========== Пользователи ==========
+def add_user(telegram_id, gender, age, city, target, bio, photo):
+    # Normalize some fields and ensure age is stored as integer when possible.
+    try:
+        age_int = int(age) if age is not None and str(age).strip() != "" else None
+    except Exception:
+        age_int = None
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT OR REPLACE INTO users (telegram_id, gender, age, city, target, bio, photo)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (telegram_id, gender, age_int, city, target, bio, photo))
+    conn.commit()
+    conn.close()
+
+
+def get_user_by_telegram_id(telegram_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+    user = cur.fetchone()
+    conn.close()
+    return user
+
+
+def update_user_field(telegram_id, field, value):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE users SET {field} = ? WHERE telegram_id = ?", (value, telegram_id))
+    conn.commit()
+    conn.close()
+
+
+# ========== Просмотр анкет ==========
+def get_random_profile(current_user_id):
     """
-    Вставляет или обновляет запись пользователя по telegram_id.
-    Возвращает id (PK) записи в users.
+    Возвращает случайную анкету, которую текущий пользователь не лайкал/дизлайкал за последние 9 дней.
     """
-    with get_connection() as conn:
-        cur = conn.cursor()
-        # пробуем найти
-        cur.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
-        row = cur.fetchone()
-        if row:
-            user_id = row["id"]
-            # обновляем переданные поля
-            if fields:
-                cols = ", ".join(f"{k}=?" for k in fields.keys())
-                values = list(fields.values()) + [telegram_id]
-                cur.execute(f"UPDATE users SET {cols} WHERE telegram_id = ?", values)
-                conn.commit()
-            return user_id
-        else:
-            cols = ", ".join(fields.keys())
-            placeholders = ", ".join("?" for _ in fields)
-            values = list(fields.values())
-            # insert with telegram_id plus fields
-            sql = f"INSERT INTO users (telegram_id, {cols}) VALUES (?, {placeholders})"
-            cur.execute(sql, [telegram_id] + values)
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT * FROM users
+    WHERE telegram_id != ?
+      AND telegram_id NOT IN (
+          SELECT to_user FROM likes
+          WHERE from_user = ?
+            AND created_at > datetime('now', '-9 days')
+      )
+    ORDER BY RANDOM() LIMIT 1
+    """, (current_user_id, current_user_id))
+
+    profile = cur.fetchone()
+    conn.close()
+    return profile
+
+
+# ========== Лайки и матчи ==========
+def add_like(from_user, to_user, action="like"):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT INTO likes (from_user, to_user, action)
+    VALUES (?, ?, ?)
+    """, (from_user, to_user, action))
+    conn.commit()
+    conn.close()
+
+
+def check_match(user1, user2):
+    """
+    Проверяет, есть ли взаимный лайк. Если да — создаёт запись в matches.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT 1 FROM likes
+    WHERE from_user = ? AND to_user = ? AND action = 'like'
+    """, (user1, user2))
+    like1 = cur.fetchone()
+
+    cur.execute("""
+    SELECT 1 FROM likes
+    WHERE from_user = ? AND to_user = ? AND action = 'like'
+    """, (user2, user1))
+    like2 = cur.fetchone()
+
+    if like1 and like2:
+        # Normalize ordering so one match row represents a pair.
+        a, b = sorted((user1, user2))
+        # Avoid duplicate match rows.
+        cur.execute("SELECT 1 FROM matches WHERE user1 = ? AND user2 = ?", (a, b))
+        exists = cur.fetchone()
+        if not exists:
+            cur.execute("INSERT INTO matches (user1, user2) VALUES (?, ?)", (a, b))
             conn.commit()
-            return cur.lastrowid
+        conn.close()
+        return True
 
-def get_user_by_telegram_id(telegram_id: int) -> Optional[sqlite3.Row]:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
-        return cur.fetchone()
+    conn.close()
+    return False
 
-def get_user_by_id(user_id: int) -> Optional[sqlite3.Row]:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-        return cur.fetchone()
+
+def get_matches_for_user(telegram_id):
+    """
+    Получает список матчей для конкретного пользователя.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+    SELECT * FROM matches
+    WHERE user1 = ? OR user2 = ?
+    """, (telegram_id, telegram_id))
+    matches = cur.fetchall()
+    conn.close()
+    return matches
+
+
 
 # Показать "следующую" анкету для пользователя (простое правило: первая, которую user ещё не лайкал/не сам)
-def get_next_profile_for(user_id: int) -> Optional[sqlite3.Row]:
+def get_next_profile_for(telegram_id: int) -> Optional[tuple]:
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute("""
             SELECT u.*
             FROM users u
-            WHERE u.id != ?
-              AND u.id NOT IN (
+            WHERE u.telegram_id != ?
+              AND u.telegram_id NOT IN (
                   SELECT to_user FROM likes WHERE from_user = ?
               )
             ORDER BY u.id
             LIMIT 1
-        """, (user_id, user_id))
+        """, (telegram_id, telegram_id))
         return cur.fetchone()
-
-# Лайк
-def add_like(from_user: int, to_user: int) -> bool:
-    """
-    Добавляем лайк; возвращаем True если добавлено, False если уже был.
-    """
-    with get_connection() as conn:
-        cur = conn.cursor()
-        try:
-            cur.execute(
-                "INSERT INTO likes (from_user, to_user) VALUES (?, ?)",
-                (from_user, to_user)
-            )
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-# Проверка на взаимный лайк -> если есть, создать запись в matches (user1 < user2)
-def check_and_create_match_if_any(a_id: int, b_id: int) -> Optional[int]:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        # проверяем есть ли обратный лайк
-        cur.execute(
-            "SELECT 1 FROM likes WHERE from_user = ? AND to_user = ?",
-            (b_id, a_id)
-        )
-        if cur.fetchone():
-            user1, user2 = (a_id, b_id) if a_id < b_id else (b_id, a_id)
-            try:
-                cur.execute(
-                    "INSERT INTO matches (user1, user2) VALUES (?, ?)",
-                    (user1, user2)
-                )
-                conn.commit()
-                return cur.lastrowid
-            except sqlite3.IntegrityError:
-                # матч уже существует
-                return None
-        return None
-
-# Полезные удобные функции
-def get_profile_payload(row: sqlite3.Row) -> Dict[str, Any]:
-    return {
-        "id": row["id"],
-        "telegram_id": row["telegram_id"],
-        "gender": row["gender"],
-        "age": row["age"],
-        "city": row["city"],
-        "target": row["target"],
-        "bio": row["bio"],
-        "photo": row["photo"],
-    }
