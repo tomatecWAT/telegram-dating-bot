@@ -140,42 +140,129 @@ def save_user_target_filters(telegram_id, target_filters: List[str]):
     """Сохраняет только фильтры по целям (Этап 1)"""
     import json
     
-    print(f"DEBUG: save_user_target_filters вызвана для пользователя {telegram_id}")
-    print(f"  target_filters: {target_filters}")
+    print(f"\n========== SAVE_USER_TARGET_FILTERS ==========")
+    print(f"DEBUG: Начало функции save_user_target_filters")
+    print(f"DEBUG: telegram_id = {telegram_id} (тип: {type(telegram_id)})")
+    print(f"DEBUG: target_filters = {target_filters} (тип: {type(target_filters)})")
     
-    target_filters_json = json.dumps(target_filters, ensure_ascii=False) if target_filters else None
+    if not isinstance(telegram_id, int):
+        print(f"ERROR: telegram_id должен быть int, получен {type(telegram_id)}")
+        return False
+    
+    if not isinstance(target_filters, list):
+        print(f"ERROR: target_filters должен быть list, получен {type(target_filters)}")
+        return False
+    
+    # Проверяем входные данные
+    if not target_filters:
+        print("WARNING: target_filters пустой, используем все цели по умолчанию")
+        target_filters = ["Дружба", "Общение", "Отношения", "Ничего серьезного", "Свидания"]
     
     try:
+        target_filters_json = json.dumps(target_filters, ensure_ascii=False)
+        print(f"DEBUG: target_filters_json = '{target_filters_json}'")
+    except Exception as e:
+        print(f"ERROR: Ошибка при преобразовании в JSON: {e}")
+        return False
+    
+    try:
+        print("DEBUG: Получаем соединение с базой данных...")
         conn = get_connection()
         cur = conn.cursor()
+        print("DEBUG: Соединение получено успешно")
+        
+        # Проверяем, существует ли таблица
+        print("DEBUG: Проверяем существование таблицы user_filters...")
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_filters'")
+        table_exists = cur.fetchone()
+        
+        if not table_exists:
+            print("ERROR: Таблица user_filters НЕ СУЩЕСТВУЕТ!")
+            print("ERROR: Необходимо запустить /create_filters_table или reset_db.py")
+            conn.close()
+            return False
+        
+        print("DEBUG: Таблица user_filters существует ✓")
         
         # Проверяем, существует ли запись
-        cur.execute("SELECT id FROM user_filters WHERE telegram_id = ?", (telegram_id,))
+        print(f"DEBUG: Ищем существующую запись для telegram_id={telegram_id}...")
+        cur.execute("SELECT id, target_filters, distance_filter FROM user_filters WHERE telegram_id = ?", (telegram_id,))
         existing = cur.fetchone()
         
         if existing:
+            existing_dict = dict(existing)
+            print(f"DEBUG: Найдена существующая запись: {existing_dict}")
+            
             # Обновляем только цели, расстояние не трогаем
+            print("DEBUG: Выполняем UPDATE...")
             cur.execute("""
             UPDATE user_filters 
             SET target_filters = ?, updated_at = CURRENT_TIMESTAMP
             WHERE telegram_id = ?
             """, (target_filters_json, telegram_id))
-            print(f"DEBUG: Обновлены цели для существующей записи")
+            operation = "UPDATE"
         else:
+            print("DEBUG: Записи не найдено, создаем новую...")
             # Создаем новую запись только с целями
             cur.execute("""
             INSERT INTO user_filters (telegram_id, target_filters, distance_filter, updated_at)
             VALUES (?, ?, NULL, CURRENT_TIMESTAMP)
             """, (telegram_id, target_filters_json))
-            print(f"DEBUG: Создана новая запись только с целями")
+            operation = "INSERT"
         
+        # Проверяем количество затронутых строк
+        rows_affected = cur.rowcount
+        print(f"DEBUG: Операция {operation}: затронуто строк = {rows_affected}")
+        
+        if rows_affected == 0:
+            print("ERROR: Ни одна строка не была изменена!")
+            conn.close()
+            return False
+        
+        # Коммитим изменения
+        print("DEBUG: Выполняем COMMIT...")
         conn.commit()
+        print("DEBUG: COMMIT выполнен успешно ✓")
+        
+        # Проверяем, что данные действительно сохранились
+        print("DEBUG: Проверяем результат сохранения...")
+        cur.execute("SELECT * FROM user_filters WHERE telegram_id = ?", (telegram_id,))
+        saved_record = cur.fetchone()
+        
+        if saved_record:
+            saved_dict = dict(saved_record)
+            print(f"DEBUG: Проверка после сохранения: {saved_dict}")
+            
+            # Дополнительно проверяем JSON
+            try:
+                parsed_targets = json.loads(saved_record['target_filters'])
+                print(f"DEBUG: Распарсенные цели: {parsed_targets}")
+                
+                if parsed_targets == target_filters:
+                    print("DEBUG: Данные сохранены корректно ✓")
+                else:
+                    print(f"ERROR: Данные не совпадают! Ожидалось: {target_filters}, получено: {parsed_targets}")
+                    conn.close()
+                    return False
+            except Exception as e:
+                print(f"ERROR: Ошибка парсинга JSON: {e}")
+                conn.close()
+                return False
+        else:
+            print("ERROR: Запись не найдена после сохранения!")
+            conn.close()
+            return False
+        
         conn.close()
-        print(f"DEBUG: Цели сохранены успешно")
+        print(f"DEBUG: Цели сохранены успешно для пользователя {telegram_id} ✓")
+        print(f"========== КОНЕЦ SAVE_USER_TARGET_FILTERS ==========\n")
         return True
         
     except Exception as e:
-        print(f"ERROR: Ошибка при сохранении целей: {e}")
+        print(f"ERROR: Критическая ошибка при сохранении целей: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"========== ОШИБКА В SAVE_USER_TARGET_FILTERS ==========\n")
         return False
 
 
@@ -183,40 +270,75 @@ def save_user_distance_filter(telegram_id, distance_km: int):
     """Сохраняет фильтр по расстоянию (Этап 2)"""
     print(f"DEBUG: save_user_distance_filter вызвана для пользователя {telegram_id}")
     print(f"  distance_km: {distance_km}")
+    print(f"  type(distance_km): {type(distance_km)}")
     
     distance_value = distance_km if distance_km is not None else None
+    print(f"DEBUG: distance_value для сохранения: {distance_value}")
     
     try:
         conn = get_connection()
         cur = conn.cursor()
         
+        # Проверяем, существует ли таблица
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_filters'")
+        table_exists = cur.fetchone()
+        if not table_exists:
+            print("ERROR: Таблица user_filters НЕ СУЩЕСТВУЕТ!")
+            conn.close()
+            return False
+        
         # Проверяем, существует ли запись
-        cur.execute("SELECT id FROM user_filters WHERE telegram_id = ?", (telegram_id,))
+        cur.execute("SELECT id, target_filters, distance_filter FROM user_filters WHERE telegram_id = ?", (telegram_id,))
         existing = cur.fetchone()
         
         if existing:
+            print(f"DEBUG: Найдена существующая запись: {dict(existing)}")
             # Обновляем расстояние, цели не трогаем
             cur.execute("""
             UPDATE user_filters 
             SET distance_filter = ?, updated_at = CURRENT_TIMESTAMP
             WHERE telegram_id = ?
             """, (distance_value, telegram_id))
-            print(f"DEBUG: Обновлено расстояние для существующей записи")
+            print(f"DEBUG: Выполнен UPDATE расстояния для пользователя {telegram_id}")
         else:
-            # Создаем новую запись только с расстоянием (это не должно происходить)
+            print("WARNING: Записи не найдено! Создаем новую только с расстоянием")
+            # Создаем новую запись только с расстоянием (это странная ситуация)
             cur.execute("""
             INSERT INTO user_filters (telegram_id, target_filters, distance_filter, updated_at)
             VALUES (?, NULL, ?, CURRENT_TIMESTAMP)
             """, (telegram_id, distance_value))
-            print(f"DEBUG: Создана новая запись только с расстоянием")
+            print(f"DEBUG: Выполнен INSERT только с расстоянием для пользователя {telegram_id}")
+        
+        # Проверяем количество затронутых строк
+        rows_affected = cur.rowcount
+        print(f"DEBUG: Количество затронутых строк: {rows_affected}")
+        
+        if rows_affected == 0:
+            print("ERROR: Ни одна строка не была изменена!")
+            conn.close()
+            return False
         
         conn.commit()
+        print("DEBUG: COMMIT расстояния выполнен успешно")
+        
+        # Проверяем результат
+        cur.execute("SELECT * FROM user_filters WHERE telegram_id = ?", (telegram_id,))
+        saved_record = cur.fetchone()
+        if saved_record:
+            print(f"DEBUG: Проверка после сохранения расстояния: {dict(saved_record)}")
+        else:
+            print("ERROR: Запись не найдена после сохранения расстояния!")
+            conn.close()
+            return False
+        
         conn.close()
-        print(f"DEBUG: Расстояние сохранено успешно")
+        print(f"DEBUG: Расстояние сохранено успешно для пользователя {telegram_id}")
         return True
         
     except Exception as e:
-        print(f"ERROR: Ошибка при сохранении расстояния: {e}")
+        print(f"ERROR: Критическая ошибка при сохранении расстояния: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

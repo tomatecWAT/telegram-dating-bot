@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardRemove, CallbackQuery
+from aiogram.types import Message, ReplyKeyboardRemove, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
@@ -27,6 +27,7 @@ from keyboards import (
     target_keyboard,
     location_keyboard,
     get_city_keyboard_with_previous,
+    filter_type_keyboard,
     filter_targets_keyboard,
     distance_keyboard,
     filters_completed_keyboard,
@@ -58,8 +59,9 @@ class Registration(StatesGroup):
 
 # ========== FSM для фильтров ==========
 class FilterSettings(StatesGroup):
-    target_selection = State()
-    distance_selection = State()
+    filter_type_selection = State()  # выбор типа фильтра (цель/расстояние)
+    target_selection = State()       # настройка целей
+    distance_selection = State()     # настройка расстояния
 
 # ========== Функция определения города по координатам ==========
 async def get_city_from_coordinates(latitude, longitude):
@@ -175,7 +177,7 @@ async def reset_profile_button(message: Message, state: FSMContext):
     # Сохраняем флаг, что это сброс профиля
     await state.update_data(is_editing=True)
 
-# ========== Фильтры - ДВУХЭТАПНЫЙ ПРОЦЕСС ==========
+# ========== Фильтры - НОВЫЙ ФЛОУ ==========
 @router.message(F.text == "🔧 Настроить фильтры")
 async def setup_filters(message: Message, state: FSMContext):
     # Получаем текущие фильтры пользователя
@@ -187,24 +189,68 @@ async def setup_filters(message: Message, state: FSMContext):
         target_text = ', '.join(targets) if targets else "Все"
         distance_text = f"{distance} км" if distance else "Без ограничений"
         
-        await message.answer(
-            f"🔧 Текущие фильтры:\n"
-            f"🎯 Цели: {target_text}\n"
-            f"📍 Расстояние: {distance_text}\n\n"
-            f"📝 ЭТАП 1 из 2: Выбери цели знакомства\n"
-            f"(можно выбрать несколько)",
-            reply_markup=filter_targets_keyboard
+        filter_status = (
+            f"🔧 Текущие фильтры:\n\n"
+            f"🎯 Цели знакомства: {target_text}\n"
+            f"📍 Максимальное расстояние: {distance_text}\n\n"
+            f"Выберите, какой фильтр хотите настроить:"
         )
     else:
-        await message.answer(
-            "🔧 Настройка фильтров\n\n"
-            f"📝 ЭТАП 1 из 2: Выбери цели знакомства\n"
-            f"(можно выбрать несколько)",
-            reply_markup=filter_targets_keyboard
+        filter_status = (
+            f"🔧 Настройка фильтров\n\n"
+            f"🎯 Цели знакомства: Все\n"
+            f"📍 Максимальное расстояние: Без ограничений\n\n"
+            f"Выберите, какой фильтр хотите настроить:"
         )
     
+    await message.answer(filter_status, reply_markup=filter_type_keyboard)
+    await state.set_state(FilterSettings.filter_type_selection)
+
+# ========== Выбор типа фильтра ==========
+@router.message(FilterSettings.filter_type_selection, F.text == "🎯 Цель")
+async def setup_target_filters(message: Message, state: FSMContext):
+    # Получаем текущие цели
+    current_filters = get_user_filters(message.from_user.id)
+    current_targets = []
+    if current_filters and current_filters['target_filters']:
+        current_targets = current_filters['target_filters']
+    
+    if current_targets:
+        targets_text = ', '.join(current_targets)
+        instruction = f"🎯 Настройка целей знакомства\n\nТекущие цели: {targets_text}\n\nВыберите цели (можно несколько):"
+    else:
+        instruction = f"🎯 Настройка целей знакомства\n\nВыберите цели (можно несколько):"
+    
+    await message.answer(instruction, reply_markup=filter_targets_keyboard)
     await state.set_state(FilterSettings.target_selection)
-    await state.update_data(selected_targets=[])
+    await state.update_data(selected_targets=current_targets.copy() if current_targets else [])
+
+@router.message(FilterSettings.filter_type_selection, F.text == "📍 Расстояние")
+async def setup_distance_filters(message: Message, state: FSMContext):
+    # Получаем текущее расстояние
+    current_filters = get_user_filters(message.from_user.id)
+    current_distance = None
+    if current_filters:
+        current_distance = current_filters['distance_filter']
+    
+    if current_distance:
+        distance_text = f"{current_distance} км"
+        instruction = f"📍 Настройка максимального расстояния\n\nТекущее расстояние: {distance_text}\n\nВыберите новое расстояние:"
+    else:
+        instruction = f"📍 Настройка максимального расстояния\n\nВыберите максимальное расстояние:"
+    
+    await message.answer(instruction, reply_markup=distance_keyboard)
+    await state.set_state(FilterSettings.distance_selection)
+
+@router.message(FilterSettings.filter_type_selection, F.text == "👀 Посмотреть анкеты")
+async def view_profiles_from_filters(message: Message, state: FSMContext):
+    await state.clear()
+    await cmd_view_filtered(message)
+
+@router.message(FilterSettings.filter_type_selection, F.text == "📄 Моя анкета")
+async def view_profile_from_filters(message: Message, state: FSMContext):
+    await state.clear()
+    await cmd_myprofile(message)
 
 @router.message(Command("setup_filters"))
 async def cmd_setup_filters(message: Message, state: FSMContext):
@@ -233,72 +279,84 @@ async def handle_gender_selection(callback: CallbackQuery, state: FSMContext):
     # Обязательно отвечаем на callback
     await callback.answer()
 
-# ========== ЭТАП 1: Выбор целей ==========
-@router.callback_query(F.data.startswith("filter_target_"))
+# ========== Настройка целей ==========
+@router.callback_query(FilterSettings.target_selection, F.data.startswith("filter_target_"))
 async def handle_target_filter_selection(callback: CallbackQuery, state: FSMContext):
+    print(f"DEBUG: handle_target_filter_selection вызван с callback.data = '{callback.data}'")
+    
     data = await state.get_data()
     selected_targets = data.get('selected_targets', [])
+    print(f"DEBUG: Текущие выбранные цели: {selected_targets}")
     
     if callback.data == "filter_target_all":
+        print("DEBUG: Выбраны ВСЕ цели")
         # Выбираем все цели
         selected_targets = ["Дружба", "Общение", "Отношения", "Ничего серьезного", "Свидания"]
         await state.update_data(selected_targets=selected_targets)
         
         await callback.message.edit_text(
-            f"📝 ЭТАП 1 из 2: Выбери цели знакомства\n\n"
+            f"🎯 Настройка целей знакомства\n\n"
             f"✅ Выбраны все цели!\n"
             f"Выбранные цели: {', '.join(selected_targets)}",
             reply_markup=filter_targets_keyboard
         )
-    elif callback.data == "filter_targets_next":
-        # Переходим к этапу 2 - выбор расстояния
+    elif callback.data == "filter_targets_save":
+        print("DEBUG: Нажата кнопка СОХРАНИТЬ")
+        # Сохраняем цели
         if not selected_targets:
+            print("DEBUG: Цели не выбраны, используем все по умолчанию")
             selected_targets = ["Дружба", "Общение", "Отношения", "Ничего серьезного", "Свидания"]
-            await state.update_data(selected_targets=selected_targets)
         
-        # СОХРАНЯЕМ ЦЕЛИ (ЭТАП 1)
-        print(f"DEBUG: Сохраняем цели на этапе 1: {selected_targets}")
+        print(f"DEBUG: Сохраняем цели: {selected_targets}")
         success = save_user_target_filters(callback.from_user.id, selected_targets)
         
         if success:
             await callback.message.edit_text(
-                f"✅ ЭТАП 1 ЗАВЕРШЕН!\n"
-                f"Цели сохранены: {', '.join(selected_targets)}\n\n"
-                f"📍 ЭТАП 2 из 2: Выбери максимальное расстояние:",
-                reply_markup=distance_keyboard
+                f"✅ Цели сохранены!\n\n"
+                f"Сохранённые цели: {', '.join(selected_targets)}\n\n"
+                f"Выберите, что настроить дальше:",
             )
-            await state.set_state(FilterSettings.distance_selection)
+            
+            # Возвращаемся к выбору типа фильтра
+            await callback.message.answer(
+                await get_current_filters_text(callback.from_user.id),
+                reply_markup=filter_type_keyboard
+            )
+            await state.set_state(FilterSettings.filter_type_selection)
         else:
             await callback.message.edit_text(
                 f"❌ Ошибка при сохранении целей!\n"
-                f"Попробуй еще раз.",
+                f"Попробуйте еще раз.",
                 reply_markup=filter_targets_keyboard
             )
     else:
+        print(f"DEBUG: Переключение конкретной цели: {callback.data}")
         # Переключаем выбор конкретной цели
         target = callback.data.replace("filter_target_", "")
+        print(f"DEBUG: Извлеченная цель: '{target}'")
         
         if target in selected_targets:
             selected_targets.remove(target)
+            print(f"DEBUG: Удалена цель '{target}'")
         else:
             selected_targets.append(target)
+            print(f"DEBUG: Добавлена цель '{target}'")
         
         await state.update_data(selected_targets=selected_targets)
         
         target_text = ', '.join(selected_targets) if selected_targets else "Ничего не выбрано"
         await callback.message.edit_text(
-            f"📝 ЭТАП 1 из 2: Выбери цели знакомства\n\n"
-            f"🎯 Выбранные цели: {target_text}",
+            f"🎯 Настройка целей знакомства\n\n"
+            f"Выбранные цели: {target_text}",
             reply_markup=filter_targets_keyboard
         )
     
     await callback.answer()
 
-# ========== ЭТАП 2: Выбор расстояния ==========
-@router.callback_query(F.data.startswith("filter_distance_"))
+# ========== Настройка расстояния ==========
+@router.callback_query(FilterSettings.distance_selection, F.data.startswith("filter_distance_"))
 async def handle_distance_filter_selection(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected_targets = data.get('selected_targets', [])
+    print(f"DEBUG: handle_distance_filter_selection вызван с callback.data = '{callback.data}'")
     
     if callback.data == "filter_distance_unlimited":
         distance_km = None
@@ -307,28 +365,53 @@ async def handle_distance_filter_selection(callback: CallbackQuery, state: FSMCo
         distance_km = int(callback.data.replace("filter_distance_", ""))
         distance_text = f"до {distance_km} км"
     
-    print(f"DEBUG: Сохраняем расстояние на этапе 2: {distance_km}")
+    print(f"DEBUG: Сохраняем расстояние: {distance_km}")
     
-    # СОХРАНЯЕМ РАССТОЯНИЕ (ЭТАП 2)
+    # Сохраняем расстояние
     success = save_user_distance_filter(callback.from_user.id, distance_km)
     
     if success:
         await callback.message.edit_text(
-            f"🎉 ФИЛЬТРЫ НАСТРОЕНЫ!\n\n"
-            f"✅ ЭТАП 1: Цели - {', '.join(selected_targets)}\n"
-            f"✅ ЭТАП 2: Расстояние - {distance_text}\n\n"
-            f"Теперь можешь просматривать подходящие анкеты!",
-            reply_markup=filters_completed_keyboard
+            f"✅ Расстояние сохранено!\n\n"
+            f"Максимальное расстояние: {distance_text}\n\n"
+            f"Выберите, что настроить дальше:"
         )
+        
+        # Возвращаемся к выбору типа фильтра
+        await callback.message.answer(
+            await get_current_filters_text(callback.from_user.id),
+            reply_markup=filter_type_keyboard
+        )
+        await state.set_state(FilterSettings.filter_type_selection)
     else:
         await callback.message.edit_text(
             f"❌ Ошибка при сохранении расстояния!\n"
-            f"Попробуй еще раз.",
+            f"Попробуйте еще раз.",
             reply_markup=distance_keyboard
         )
     
-    await state.clear()
-    await callback.answer("Фильтры сохранены!")
+    await callback.answer()
+
+# ========== Вспомогательная функция ==========
+async def get_current_filters_text(telegram_id):
+    """Возвращает текст с текущими фильтрами"""
+    current_filters = get_user_filters(telegram_id)
+    
+    if current_filters:
+        targets = current_filters['target_filters']
+        distance = current_filters['distance_filter']
+        target_text = ', '.join(targets) if targets else "Все"
+        distance_text = f"{distance} км" if distance else "Без ограничений"
+    else:
+        target_text = "Все"
+        distance_text = "Без ограничений"
+    
+    return (
+        f"🔧 Текущие фильтры:\n\n"
+        f"🎯 Цели знакомства: {target_text}\n"
+        f"📍 Максимальное расстояние: {distance_text}\n\n"
+        f"Выберите, какой фильтр хотите настроить:"
+    )
 
 # ========== Действия после завершения настройки фильтров ==========
 @router.callback_query(F.data == "start_viewing_profiles")
@@ -337,9 +420,6 @@ async def start_viewing_profiles(callback: CallbackQuery):
     await callback.message.delete()  # Удаляем сообщение с кнопками
     
     # Имитируем нажатие кнопки "Смотреть анкеты"
-    from aiogram.types import Message as MockMessage
-    
-    # Создаем временное сообщение для передачи в функцию просмотра
     mock_message = callback.message
     mock_message.from_user = callback.from_user
     
@@ -349,15 +429,13 @@ async def start_viewing_profiles(callback: CallbackQuery):
 @router.callback_query(F.data == "change_filters")
 async def change_filters(callback: CallbackQuery, state: FSMContext):
     """Изменяем фильтры заново"""
+    # Показываем меню выбора типа фильтра
     await callback.message.edit_text(
-        "🔧 Изменение фильтров\n\n"
-        f"📝 ЭТАП 1 из 2: Выбери цели знакомства\n"
-        f"(можно выбрать несколько)",
-        reply_markup=filter_targets_keyboard
+        await get_current_filters_text(callback.from_user.id),
+        reply_markup=filter_type_keyboard
     )
     
-    await state.set_state(FilterSettings.target_selection)
-    await state.update_data(selected_targets=[])
+    await state.set_state(FilterSettings.filter_type_selection)
     await callback.answer()
 
 # ========== FSM-хендлеры регистрации ==========
@@ -500,8 +578,11 @@ async def cmd_view_filtered(message: Message):
             "Возможные причины:\n"
             "• Фильтры слишком строгие\n"
             "• Все подходящие анкеты уже просмотрены\n\n"
-            "Попробуй изменить фильтры или подождать новых пользователей.",
-            reply_markup=filters_completed_keyboard
+            "Попробуй изменить фильтры.",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="🔧 Настроить фильтры")]],
+                resize_keyboard=True
+            )
         )
         return
 
@@ -553,8 +634,11 @@ async def cmd_view_command_filtered(message: Message):
     if not profile:
         await message.answer(
             "❌ Нет анкет для просмотра!\n\n"
-            "Попробуй настроить фильтры командой /setup_filters",
-            reply_markup=filters_completed_keyboard
+            "Попробуй настроить фильтры.",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="🔧 Настроить фильтры")]],
+                resize_keyboard=True
+            )
         )
         return
 
@@ -636,4 +720,81 @@ async def debug_filters_command(message: Message):
         f"🔧 Отладка фильтров:\n"
         f"Твои фильтры: {user_filters}\n"
         f"Подробности в консоли сервера."
+    )
+
+@router.message(Command("create_filters_table"))
+async def create_filters_table_command(message: Message):
+    """Принудительно создает таблицу фильтров"""
+    try:
+        from database import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Создаем таблицу фильтров
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_filters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE NOT NULL,
+            target_filters TEXT,
+            distance_filter INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        
+        conn.commit()
+        
+        # Проверяем создание
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_filters'")
+        table_exists = cur.fetchone()
+        
+        if table_exists:
+            await message.answer("✅ Таблица user_filters создана успешно!")
+        else:
+            await message.answer("❌ Не удалось создать таблицу user_filters")
+        
+        conn.close()
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при создании таблицы: {e}")
+
+@router.message(Command("test_filter_save"))
+async def test_filter_save_command(message: Message):
+    """Тестовая команда для проверки сохранения фильтров"""
+    test_targets = ["Отношения", "Дружба"]
+    test_distance = 15
+    
+    print("=== ТЕСТ СОХРАНЕНИЯ ФИЛЬТРОВ ===")
+    
+    # Тест сохранения целей
+    success1 = save_user_target_filters(message.from_user.id, test_targets)
+    print(f"Результат сохранения целей: {success1}")
+    
+    # Тест сохранения расстояния
+    success2 = save_user_distance_filter(message.from_user.id, test_distance)
+    print(f"Результат сохранения расстояния: {success2}")
+    
+    # Проверяем загрузку
+    loaded_filters = get_user_filters(message.from_user.id)
+    print(f"Загруженные фильтры: {loaded_filters}")
+    
+    await message.answer(
+        f"🧪 Тест сохранения фильтров:\n"
+        f"Цели: {success1} ✅ если True\n"
+        f"Расстояние: {success2} ✅ если True\n"
+        f"Загруженные: {loaded_filters}\n"
+        f"Подробности в консоли."
+    )
+
+@router.message(Command("test_callbacks"))
+async def test_callbacks_command(message: Message, state: FSMContext):
+    """Тестовая команда для проверки callback'ов"""
+    # Устанавливаем состояние для тестирования
+    await state.set_state(FilterSettings.target_selection)
+    await state.update_data(selected_targets=["Отношения"])
+    
+    await message.answer(
+        "🧪 Тест callback'ов фильтров\n"
+        "Попробуй нажать кнопки:",
+        reply_markup=filter_targets_keyboard
     )

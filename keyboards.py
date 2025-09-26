@@ -45,7 +45,16 @@ def get_city_keyboard_with_previous(previous_city=None):
         return location_keyboard
 
 # ========== Клавиатуры для фильтров ==========
-# Клавиатура для выбора целей (множественный выбор) - ЭТАП 1
+# Клавиатура выбора ТИПА фильтра - ГЛАВНОЕ МЕНЮ ФИЛЬТРОВ
+filter_type_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🎯 Цель"), KeyboardButton(text="📍 Расстояние")],
+        [KeyboardButton(text="👀 Посмотреть анкеты"), KeyboardButton(text="📄 Моя анкета")]
+    ],
+    resize_keyboard=True
+)
+
+# Клавиатура для выбора целей - с кнопкой СОХРАНИТЬ
 filter_targets_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [
@@ -58,11 +67,11 @@ filter_targets_keyboard = InlineKeyboardMarkup(
         ],
         [InlineKeyboardButton(text="🌟 Свидания", callback_data="filter_target_Свидания")],
         [InlineKeyboardButton(text="✅ Все цели", callback_data="filter_target_all")],
-        [InlineKeyboardButton(text="➡️ ДАЛЕЕ: Выбрать расстояние", callback_data="filter_targets_next")]
+        [InlineKeyboardButton(text="💾 СОХРАНИТЬ", callback_data="filter_targets_save")]
     ]
 )
 
-# Клавиатура для выбора расстояния - ЭТАП 2
+# Клавиатура для выбора расстояния - с кнопкой СОХРАНИТЬ
 distance_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="🏠 Рядом (до 5 км)", callback_data="filter_distance_5")],
@@ -73,7 +82,7 @@ distance_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-# Клавиатура после завершения настройки фильтров
+# Клавиатура после завершения настройки фильтров (остается такой же)
 filters_completed_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="👀 Посмотреть анкеты", callback_data="start_viewing_profiles")],
