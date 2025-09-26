@@ -136,8 +136,92 @@ def update_user_coordinates(telegram_id, latitude, longitude):
 
 
 # ========== Фильтры ==========
+def save_user_target_filters(telegram_id, target_filters: List[str]):
+    """Сохраняет только фильтры по целям (Этап 1)"""
+    import json
+    
+    print(f"DEBUG: save_user_target_filters вызвана для пользователя {telegram_id}")
+    print(f"  target_filters: {target_filters}")
+    
+    target_filters_json = json.dumps(target_filters, ensure_ascii=False) if target_filters else None
+    
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Проверяем, существует ли запись
+        cur.execute("SELECT id FROM user_filters WHERE telegram_id = ?", (telegram_id,))
+        existing = cur.fetchone()
+        
+        if existing:
+            # Обновляем только цели, расстояние не трогаем
+            cur.execute("""
+            UPDATE user_filters 
+            SET target_filters = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+            """, (target_filters_json, telegram_id))
+            print(f"DEBUG: Обновлены цели для существующей записи")
+        else:
+            # Создаем новую запись только с целями
+            cur.execute("""
+            INSERT INTO user_filters (telegram_id, target_filters, distance_filter, updated_at)
+            VALUES (?, ?, NULL, CURRENT_TIMESTAMP)
+            """, (telegram_id, target_filters_json))
+            print(f"DEBUG: Создана новая запись только с целями")
+        
+        conn.commit()
+        conn.close()
+        print(f"DEBUG: Цели сохранены успешно")
+        return True
+        
+    except Exception as e:
+        print(f"ERROR: Ошибка при сохранении целей: {e}")
+        return False
+
+
+def save_user_distance_filter(telegram_id, distance_km: int):
+    """Сохраняет фильтр по расстоянию (Этап 2)"""
+    print(f"DEBUG: save_user_distance_filter вызвана для пользователя {telegram_id}")
+    print(f"  distance_km: {distance_km}")
+    
+    distance_value = distance_km if distance_km is not None else None
+    
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Проверяем, существует ли запись
+        cur.execute("SELECT id FROM user_filters WHERE telegram_id = ?", (telegram_id,))
+        existing = cur.fetchone()
+        
+        if existing:
+            # Обновляем расстояние, цели не трогаем
+            cur.execute("""
+            UPDATE user_filters 
+            SET distance_filter = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+            """, (distance_value, telegram_id))
+            print(f"DEBUG: Обновлено расстояние для существующей записи")
+        else:
+            # Создаем новую запись только с расстоянием (это не должно происходить)
+            cur.execute("""
+            INSERT INTO user_filters (telegram_id, target_filters, distance_filter, updated_at)
+            VALUES (?, NULL, ?, CURRENT_TIMESTAMP)
+            """, (telegram_id, distance_value))
+            print(f"DEBUG: Создана новая запись только с расстоянием")
+        
+        conn.commit()
+        conn.close()
+        print(f"DEBUG: Расстояние сохранено успешно")
+        return True
+        
+    except Exception as e:
+        print(f"ERROR: Ошибка при сохранении расстояния: {e}")
+        return False
+
+
 def save_user_filters(telegram_id, target_filters: List[str], distance_km: int):
-    """Сохраняет фильтры пользователя"""
+    """Сохраняет фильтры пользователя (полная версия для обратной совместимости)"""
     import json
     
     print(f"DEBUG: save_user_filters вызвана с параметрами:")

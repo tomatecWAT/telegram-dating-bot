@@ -16,7 +16,7 @@ from database import (
     add_like,
     check_match,
     save_user_filters,
-    # save_user_target_filters,
+    save_user_target_filters,
     save_user_distance_filter,
     get_user_filters,
     debug_filters_table
@@ -206,6 +206,33 @@ async def setup_filters(message: Message, state: FSMContext):
     await state.set_state(FilterSettings.target_selection)
     await state.update_data(selected_targets=[])
 
+@router.message(Command("setup_filters"))
+async def cmd_setup_filters(message: Message, state: FSMContext):
+    """Команда для быстрого доступа к настройке фильтров"""
+    await setup_filters(message, state)
+
+# ========== Callback-хендлеры ==========
+
+# Callback-хендлер для выбора пола
+@router.callback_query(F.data.in_(["gender_female", "gender_male"]))
+async def handle_gender_selection(callback: CallbackQuery, state: FSMContext):
+    # Получаем выбранный пол из callback_data
+    gender = "female" if callback.data == "gender_female" else "male"
+    
+    # Сохраняем в FSM
+    await state.update_data(gender=gender)
+    
+    # Отвечаем на callback и редактируем сообщение
+    gender_text = "👩 Девушка" if gender == "female" else "👨 Парень"
+    await callback.message.edit_text(f"Выбран пол: {gender_text}")
+    
+    # Переходим к вводу имени
+    await callback.message.answer("Как тебя зовут? Напиши своё имя:")
+    await state.set_state(Registration.name)
+    
+    # Обязательно отвечаем на callback
+    await callback.answer()
+
 # ========== ЭТАП 1: Выбор целей ==========
 @router.callback_query(F.data.startswith("filter_target_"))
 async def handle_target_filter_selection(callback: CallbackQuery, state: FSMContext):
@@ -231,7 +258,7 @@ async def handle_target_filter_selection(callback: CallbackQuery, state: FSMCont
         
         # СОХРАНЯЕМ ЦЕЛИ (ЭТАП 1)
         print(f"DEBUG: Сохраняем цели на этапе 1: {selected_targets}")
-        success = save_user_filters(callback.from_user.id, selected_targets)
+        success = save_user_target_filters(callback.from_user.id, selected_targets)
         
         if success:
             await callback.message.edit_text(
@@ -332,109 +359,6 @@ async def change_filters(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FilterSettings.target_selection)
     await state.update_data(selected_targets=[])
     await callback.answer()
-
-# ========== Callback-хендлеры ==========
-
-# Callback-хендлер для выбора пола
-@router.callback_query(F.data.in_(["gender_female", "gender_male"]))
-async def handle_gender_selection(callback: CallbackQuery, state: FSMContext):
-    # Получаем выбранный пол из callback_data
-    gender = "female" if callback.data == "gender_female" else "male"
-    
-    # Сохраняем в FSM
-    await state.update_data(gender=gender)
-    
-    # Отвечаем на callback и редактируем сообщение
-    gender_text = "👩 Девушка" if gender == "female" else "👨 Парень"
-    await callback.message.edit_text(f"Выбран пол: {gender_text}")
-    
-    # Переходим к вводу имени
-    await callback.message.answer("Как тебя зовут? Напиши своё имя:")
-    await state.set_state(Registration.name)
-    
-    # Обязательно отвечаем на callback
-    await callback.answer()
-
-# Callback-хендлеры для фильтров
-@router.callback_query(F.data.startswith("filter_target_"))
-async def handle_target_filter_selection(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected_targets = data.get('selected_targets', [])
-    
-    if callback.data == "filter_target_all":
-        # Выбираем все цели
-        selected_targets = ["Дружба", "Общение", "Отношения", "Ничего серьезного", "Свидания"]
-        await state.update_data(selected_targets=selected_targets)
-        
-        await callback.message.edit_text(
-            f"✅ Выбраны все цели!\n"
-            f"Выбранные цели: {', '.join(selected_targets)}",
-            reply_markup=filter_targets_keyboard
-        )
-    elif callback.data == "filter_targets_save":
-        # Сохраняем выбранные цели и переходим к расстоянию
-        if not selected_targets:
-            selected_targets = ["Дружба", "Общение", "Отношения", "Ничего серьезного", "Свидания"]
-            await state.update_data(selected_targets=selected_targets)
-        
-        await callback.message.edit_text(
-            f"✅ Цели сохранены: {', '.join(selected_targets)}\n\n"
-            f"Теперь выбери максимальное расстояние:",
-            reply_markup=distance_keyboard
-        )
-        await state.set_state(FilterSettings.distance_selection)
-    else:
-        # Переключаем выбор конкретной цели
-        target = callback.data.replace("filter_target_", "")
-        
-        if target in selected_targets:
-            selected_targets.remove(target)
-        else:
-            selected_targets.append(target)
-        
-        await state.update_data(selected_targets=selected_targets)
-        
-        target_text = ', '.join(selected_targets) if selected_targets else "Ничего не выбрано"
-        await callback.message.edit_text(
-            f"🎯 Выбранные цели: {target_text}\n\n"
-            f"Выбери цели знакомства (можно несколько):",
-            reply_markup=filter_targets_keyboard
-        )
-    
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("filter_distance_"))
-async def handle_distance_filter_selection(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected_targets = data.get('selected_targets', [])
-    
-    if callback.data == "filter_distance_unlimited":
-        distance_km = None
-        distance_text = "Без ограничений"
-    else:
-        distance_km = int(callback.data.replace("filter_distance_", ""))
-        distance_text = f"до {distance_km} км"
-    
-    print(f"DEBUG: Сохраняем фильтры для пользователя {callback.from_user.id}")
-    print(f"DEBUG: Цели: {selected_targets}")
-    print(f"DEBUG: Расстояние: {distance_km}")
-    
-    # Сохраняем фильтры в базу данных
-    save_user_filters(callback.from_user.id, selected_targets, distance_km)
-    
-    # Проверяем, что фильтры сохранились
-    saved_filters = get_user_filters(callback.from_user.id)
-    print(f"DEBUG: Проверка сохраненных фильтров: {saved_filters}")
-    
-    await callback.message.edit_text(
-        f"✅ Фильтры настроены!\n\n"
-        f"🎯 Цели: {', '.join(selected_targets)}\n"
-        f"📍 Расстояние: {distance_text}\n\n"
-        f"Теперь при просмотре анкет будут показываться только подходящие профили."
-    )
-    
-    await state.clear()
-    await callback.answer("Фильтры сохранены!")
 
 # ========== FSM-хендлеры регистрации ==========
 @router.message(Registration.name)
@@ -571,13 +495,28 @@ async def cmd_view_filtered(message: Message):
         print(f"DEBUG: Без фильтров. Найденный профиль: {profile['name'] if profile else 'Нет анкет'}")
     
     if not profile:
-        await message.answer("Пока нет анкет для просмотра, попробуй изменить фильтры.")
+        await message.answer(
+            "❌ Нет анкет для просмотра!\n\n"
+            "Возможные причины:\n"
+            "• Фильтры слишком строгие\n"
+            "• Все подходящие анкеты уже просмотрены\n\n"
+            "Попробуй изменить фильтры или подождать новых пользователей.",
+            reply_markup=filters_completed_keyboard
+        )
         return
 
     # Отображение пола с эмодзи
     gender_display = "👩 Девушка" if profile['gender'] == "female" else "👨 Парень"
     
+    # Показываем информацию о том, что фильтры работают
+    filter_info = ""
+    if filters:
+        targets_text = ', '.join(filters['target_filters']) if filters['target_filters'] else "Все"
+        distance_text = f"{filters['distance_filter']} км" if filters['distance_filter'] else "∞"
+        filter_info = f"🔍 Фильтры: {targets_text} | {distance_text}\n\n"
+    
     text = (
+        f"{filter_info}"
         f"👋 Имя: {profile['name'] or 'Не указано'}\n"
         f"👤 Пол: {gender_display}\n"
         f"🎂 Возраст: {profile['age']}\n"
@@ -595,18 +534,7 @@ async def cmd_view_filtered(message: Message):
     viewing_state[message.from_user.id] = profile
     await message.answer(view_menu_text, reply_markup=view_menu)
 
-@router.message(Command("debug_filters"))
-async def debug_filters_command(message: Message):
-    """Отладочная команда для проверки фильтров"""
-    print("=== DEBUG FILTERS ===")
-    debug_filters_table()
-    
-    user_filters = get_user_filters(message.from_user.id)
-    await message.answer(
-        f"🔧 Отладка фильтров:\n"
-        f"Твои фильтры: {user_filters}\n"
-        f"Подробности в консоли сервера."
-    )
+@router.message(Command("view"))
 async def cmd_view_command_filtered(message: Message):
     # Получаем фильтры пользователя
     filters = get_user_filters(message.from_user.id)
@@ -623,13 +551,25 @@ async def cmd_view_command_filtered(message: Message):
         profile = get_random_profile(message.from_user.id)
     
     if not profile:
-        await message.answer("Пока нет анкет для просмотра, попробуй изменить фильтры.")
+        await message.answer(
+            "❌ Нет анкет для просмотра!\n\n"
+            "Попробуй настроить фильтры командой /setup_filters",
+            reply_markup=filters_completed_keyboard
+        )
         return
 
     # Отображение пола с эмодзи
     gender_display = "👩 Девушка" if profile['gender'] == "female" else "👨 Парень"
     
+    # Показываем информацию о том, что фильтры работают
+    filter_info = ""
+    if filters:
+        targets_text = ', '.join(filters['target_filters']) if filters['target_filters'] else "Все"
+        distance_text = f"{filters['distance_filter']} км" if filters['distance_filter'] else "∞"
+        filter_info = f"🔍 Фильтры: {targets_text} | {distance_text}\n\n"
+    
     text = (
+        f"{filter_info}"
         f"👋 Имя: {profile['name'] or 'Не указано'}\n"
         f"👤 Пол: {gender_display}\n"
         f"🎂 Возраст: {profile['age']}\n"
@@ -683,3 +623,17 @@ async def pause_search(message: Message):
 @router.message(F.text == "🚫 Я больше не хочу никого искать")
 async def stop_search(message: Message):
     await message.answer(stopped_menu_text, reply_markup=stopped_menu)
+
+# ========== Отладочные команды ==========
+@router.message(Command("debug_filters"))
+async def debug_filters_command(message: Message):
+    """Отладочная команда для проверки фильтров"""
+    print("=== DEBUG FILTERS ===")
+    debug_filters_table()
+    
+    user_filters = get_user_filters(message.from_user.id)
+    await message.answer(
+        f"🔧 Отладка фильтров:\n"
+        f"Твои фильтры: {user_filters}\n"
+        f"Подробности в консоли сервера."
+    )
